@@ -30,7 +30,7 @@ def ensure_sa_file():
     cuenta de servicio, escribe ese contenido en el path SA_JSON_PATH
     (por defecto ./service_account.json). Así evitamos subir el archivo al repo.
     """
-    sa_json_env = os.getenv("SERVICE_ACCOUNT_JSON")  # <-- pondremos esto en Railway
+    sa_json_env = os.getenv("SERVICE_ACCOUNT_JSON")  # <-- pondremos esto en Railway/Render
     if sa_json_env:
         try:
             # Crear el archivo si no existe o si está vacío
@@ -163,15 +163,21 @@ def persist_to_gsheets(rec):
     row = [rec.get(k,"") for k in HEADERS]
     ws.append_row(row, value_input_option="USER_ENTERED")
 
+# === Helpers de validación obligatoria ===
+def has_required_description(rec) -> bool:
+    """Debe existir al menos una: categoria, subcategoria o detalle."""
+    return any(rec.get(k) for k in ("categoria", "subcategoria", "detalle"))
+
 # === Telegram Handlers ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Soy tu bot de gastos.\n"
-        "Envíame mensajes como:\n"
+        "Datos obligatorios: 💰 valor y 📝 descripción (categoría/subcategoría/detalle).\n"
+        "Ejemplos:\n"
         "• 'Uber 7.820 a la oficina'\n"
-        "• 'Almuerzo 28.500 en El Corral con tarjeta'\n"
+        "• 'Almuerzo 28.500 en El Corral'\n"
         "• 'Mercado Carulla 99.900 frutas y verduras'\n"
-        "y los guardaré en tu Google Sheets 'gastos_diarios'."
+        "Guardaré todo en tu Google Sheets 'gastos_diarios'."
     )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -179,10 +185,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         rec = call_gpt_extract(text)
         if not rec:
-            await update.message.reply_text("No pude entender el gasto 😅. Intenta escribirlo más claro.")
+            await update.message.reply_text("😅 No pude entender el gasto. Decime el monto y una descripción corta (ej: 'comida almuerzo 28000').")
             return
 
         rec = normalize_record(rec)
+
+        # 🔒 Validación de campos obligatorios
+        if not rec["valor"]:
+            await update.message.reply_text("💰 Me falta el valor del gasto. Enviame el monto (ej: 25000 o 28.500).")
+            return
+
+        if not has_required_description(rec):
+            await update.message.reply_text("📝 Necesito una descripción/categoría. Decime algo como: 'comida/almuerzo', 'transporte/taxi' o un detalle corto.")
+            return
+
+        # Persistir
         persist_to_gsheets(rec)
 
         await update.message.reply_text(
@@ -190,6 +207,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + (f" | {rec['plataforma']}" if rec.get('plataforma') else "")
             + (f" | {rec['tienda']}" if rec.get('tienda') else "")
         )
+
     except Exception as e:
         await update.message.reply_text(f"Error: {e}")
 
