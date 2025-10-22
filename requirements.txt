@@ -5,3 +5,4 @@ google-auth
 pytz
 python-dotenv
 notion-client
+flask
