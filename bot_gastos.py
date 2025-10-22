@@ -1,3 +1,4 @@
+import asyncio
 import os, json, re, datetime as dt
 import pytz
 from dotenv import load_dotenv
@@ -8,6 +9,8 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Con
 from openai import OpenAI
 import gspread
 from google.oauth2.service_account import Credentials
+from notion import add_new_page, get_database_id, generate_page, get_deudores
+from datetime import datetime
 
 # === Cargar variables .env ===
 load_dotenv()
@@ -17,11 +20,14 @@ SHEET_NAME = os.getenv("GSPREAD_SHEET_NAME", "gastos_diarios")
 SA_JSON_PATH = os.getenv("GSPREAD_SA_JSON", "./service_account.json")
 TZ = pytz.timezone(os.getenv("TZ", "America/Bogota"))
 
+fecha = datetime.now()
+year = str(fecha.year)
+
 # === Inicializar clientes ===
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # === Google Sheets helpers ===
-HEADERS = ["fecha","hora","valor","plataforma","tienda","categoria","subcategoria","detalle"]
+HEADERS = ["fecha","hora","valor","comercio","categoria","subcategoria","detalle", "cuenta"]
 
 # --- Soporte para credencial desde variable de entorno ---
 def ensure_sa_file():
@@ -50,6 +56,24 @@ def get_or_create_sheet():
         ws.clear()
         ws.append_row(HEADERS)
     return ws
+
+async def add_to_notion(rec):    
+    fecha = datetime.strptime(f"{rec["fecha"]} {rec["hora"]}", "%Y-%m-%d %H:%M")
+
+    page_data = generate_page(
+        detalle=rec["detalle"],
+        categoria=rec["categoria"],
+        subcategoria=rec["subcategoria"],
+        valor=rec["valor"],
+        comercio=rec["comercio"],
+        cuenta=rec["cuenta"].lower(),
+        fecha=fecha.isoformat()
+    )
+
+    db_id = await get_database_id(str(fecha.year))#id_gastos
+
+    await add_new_page(db_id[0], page_data)
+    
 
 # === Utilidades de validación de fecha/hora ===
 DATE_RX = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -89,15 +113,15 @@ def call_gpt_extract(msg_text):
     system_prompt = (
         "Eres un extractor estricto de gastos personales en Colombia. "
         "Devuelves SOLO JSON con estas claves exactas: "
-        "{'fecha','hora','valor','plataforma','tienda','categoria','subcategoria','detalle'}. "
+        "{'fecha','hora','valor','comercio','categoria','subcategoria','detalle', 'cuenta'}. "
         "Reglas: "
         "- JSON válido, sin texto adicional. "
         "- NO infieras fecha ni hora: si el usuario no las menciona explícitamente, deja \"fecha\" y/o \"hora\" como string vacío. "
         "- Moneda por defecto COP; normaliza '28.500' → 28500 (entero). "
-        "- 'plataforma' es app (Uber, DiDi, Rappi, iFood, etc.) o vacío. "
-        "- 'tienda' es comercio/lugar si se menciona. "
+        "- 'comercio' es comercio/lugar/tienda/app si se menciona. "
         "- 'categoria/subcategoria' concisas ('comida/almuerzo', 'transporte/taxi', etc.). "
         "- 'detalle' es descripción breve. "
+        "- 'cuenta' es el nombre de la cuenta donde salio el dinero posibles opciones son colpatria, nu, rappi card, nequi, rappi cuenta"
         "- No incluyas explicaciones ni comentarios, solo el JSON."
     )
     user_prompt = f'Texto: "{msg_text}"'
@@ -139,7 +163,7 @@ def normalize_record(rec):
     rec["hora"]  = hora
 
     # strings seguros
-    for k in ["plataforma","tienda","categoria","subcategoria","detalle"]:
+    for k in ["comercio","categoria","subcategoria","detalle"]:
         rec[k] = (rec.get(k,"") or "").strip()
 
     # asegurar todas las claves
@@ -182,15 +206,27 @@ def has_required_description(rec) -> bool:
 # === Telegram Handlers ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Soy tu bot de gastos.\n"
-        "Obligatorio: 💰 valor y 📝 descripción (categoría/subcategoría/detalle).\n"
-        "Regla: si la categoría es 'alimentación/comida' y el gasto es entre 18:00 y 02:00, subcategoría = 'cena'.\n"
-        "Ejemplos:\n"
-        "• 'Uber 7.820 a la oficina'\n"
-        "• 'Almuerzo 28.500 en El Corral'\n"
-        "• 'Comida 40.000 El Corral 20:30'\n"
-        "Guardaré todo en tu Google Sheets 'gastos_diarios'."
+        "👋 Soy tu bot de gastos y finanzas.\n"
+        "-Para agregar gasto obligatorio: 💰 valor, 📝 descripción (categoría/subcategoría/detalle) y 🏦 cuenta.\n"
+        "Ejemplos: 'Uber 7.820 a la oficina, colpatria', 'Nendoroid 200000 en Amazon japon, nu'\n-----------------\n"
+        "Guardaré todo en tu Google Sheets 'gastos_diarios' y en Notion.\n"
+        "-Para agregar un deudor: incluye la palabra DEUDOR. Ejemplo: 'Deudor luis netflix julio 15000'.\n-----------------\n"
+        "-Para agregar un abono de deudor: usar /deudores para saber los que hay y luego pasa la misma descripcion y usa la palabra ABONO.\n-----------------\n"
+        "Ejemplo: 'abono luis netflix julio 15000'.\n"
+        "-Para agregar una deuda: incluye la palabra DEUDA. Ejemplo: 'Deuda novaventa 18.000'.\n-----------------\n"
+        "-Para agregar un pago a deuda: usar /deudas para saber los que hay y luego pasa la misma descripcion y usa la palabra PAGO.\n-----------------\n"
+        "Ejemplo: 'pago novaventa 15000'.\n"
     )
+
+async def deudores(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db_id = await get_database_id(year)
+    deudores_list = await get_deudores(db_id[2])
+    await update.message.reply_text(deudores_list)
+    
+async def deudas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db_id = await get_database_id(year)
+    deudores_list = await get_deudores(db_id[1])
+    await update.message.reply_text(deudores_list)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -209,25 +245,32 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not has_required_description(rec):
             await update.message.reply_text("📝 Necesito una descripción/categoría. Decime algo como: 'comida/almuerzo', 'transporte/taxi' o un detalle corto.")
             return
+        if not rec["cuenta"]:
+            await update.message.reply_text("🏦 Me falta la cuenta de donde salió el dinero. Por favor indícala (ej: colpatria, nu, rappi card, nequi, rappi cuenta).")
+            return
 
         # Reglas de negocio
         rec = enforce_business_rules(rec)
 
         # Guardar
         persist_to_gsheets(rec)
+        await add_to_notion(rec)
 
         await update.message.reply_text(
             f"✅ Guardado: {rec['categoria']} / {rec['subcategoria']} | ${rec['valor']} | {rec['fecha']} {rec['hora']}"
-            + (f" | {rec['plataforma']}" if rec.get('plataforma') else "")
-            + (f" | {rec['tienda']}" if rec.get('tienda') else "")
+            + (f" | {rec['comercio']}" if rec.get('comercio') else "")
+            + (f" | {rec['cuenta']}" if rec.get('cuenta') else "")
         )
 
     except Exception as e:
         await update.message.reply_text(f"Error: {e}")
 
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    asyncio.set_event_loop(asyncio.new_event_loop())
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()    
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("deudores", deudores))
+    app.add_handler(CommandHandler("deudas", deudas))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.run_polling()
 
