@@ -266,7 +266,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Error: {e}")
 
 def main():
-    asyncio.set_event_loop(asyncio.new_event_loop())
+    # asyncio.set_event_loop(asyncio.new_event_loop())
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("deudores", deudores))
