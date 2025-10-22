@@ -11,6 +11,8 @@ import gspread
 from google.oauth2.service_account import Credentials
 from notion import add_new_page, get_database_id, generate_page, get_deudores
 from datetime import datetime
+from threading import Thread
+from flask import Flask
 
 # === Cargar variables .env ===
 load_dotenv()
@@ -265,8 +267,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Error: {e}")
 
+# --- Servidor Flask “dummy” ---
+web_app = Flask(__name__)
+
+def home():
+    return "Bot de Telegram activo 🟢"
+
+def run_web():
+    port = int(os.environ.get("PORT", 8080))
+    web_app.run(host="0.0.0.0", port=port)
+
 def main():
-    # asyncio.set_event_loop(asyncio.new_event_loop())
+    asyncio.set_event_loop(asyncio.new_event_loop())
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("deudores", deudores))
@@ -275,4 +287,6 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    # main()
+    Thread(target=main).start()
+    run_web()
