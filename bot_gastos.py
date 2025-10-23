@@ -1,5 +1,6 @@
 import asyncio
 import os, json, re, datetime as dt
+import threading
 import pytz
 from dotenv import load_dotenv
 
@@ -268,25 +269,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Error: {e}")
 
 # --- Servidor Flask “dummy” ---
-web_app = Flask(__name__)
+app = Flask(__name__)
 
+@app.route("/")
 def home():
     return "Bot de Telegram activo 🟢"
 
-def run_web():
-    port = int(os.environ.get("PORT", 8080))
-    web_app.run(host="0.0.0.0", port=port)
-
 def main():
     asyncio.set_event_loop(asyncio.new_event_loop())
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()    
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("deudores", deudores))
-    app.add_handler(CommandHandler("deudas", deudas))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.run_polling()
+    bot = (
+        ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build() 
+    ) 
+    bot.add_handler(CommandHandler("start", start))
+    bot.add_handler(CommandHandler("deudores", deudores))
+    bot.add_handler(CommandHandler("deudas", deudas))
+    bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    bot.run_polling()
 
 if __name__ == "__main__":
     # main()
-    Thread(target=main).start()
-    run_web()
+    threading.Thread(target=main).start()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
