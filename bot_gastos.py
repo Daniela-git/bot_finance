@@ -13,7 +13,7 @@ from google.oauth2.service_account import Credentials
 from notion import add_new_page, get_database_id, generate_page, get_deudores
 from datetime import datetime
 from threading import Thread
-from flask import Flask
+from flask import Flask, request
 
 # === Cargar variables .env ===
 load_dotenv()
@@ -269,25 +269,41 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Error: {e}")
 
 # --- Servidor Flask “dummy” ---
+WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL")  # Render la crea automáticamente
+PORT = int(os.environ.get("PORT", 8080))
+
 app = Flask(__name__)
+bot_app = None  # se inicializa luego
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("¡Bot activo y listo en Render! 🟢")
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"Recibí: {update.message.text}")
 
 @app.route("/")
 def home():
-    return "Bot de Telegram activo 🟢"
+    return "Bot de Telegram activo en Render 🟢"
+
+@app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
+def receive_update():
+    update = Update.de_json(request.get_json(force=True), bot_app.bot)
+    asyncio.run(bot_app.process_update(update))
+    return "ok"
+
+async def setup_webhook():
+    webhook_url = f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}"
+    await bot_app.bot.set_webhook(url=webhook_url)
+    print(f"Webhook configurado en {webhook_url}")
 
 def main():
-    asyncio.set_event_loop(asyncio.new_event_loop())
-    bot = (
-        ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build() 
-    ) 
-    bot.add_handler(CommandHandler("start", start))
-    bot.add_handler(CommandHandler("deudores", deudores))
-    bot.add_handler(CommandHandler("deudas", deudas))
-    bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    bot.run_polling()
+    global bot_app
+    bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    bot_app.add_handler(CommandHandler("start", start))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    asyncio.run(setup_webhook())
+    app.run(host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
-    # main()
-    threading.Thread(target=main).start()
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    main()
