@@ -1,6 +1,5 @@
 import asyncio
 import os, json, re, datetime as dt
-import threading
 import pytz
 from dotenv import load_dotenv
 
@@ -10,10 +9,10 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Con
 from openai import OpenAI
 import gspread
 from google.oauth2.service_account import Credentials
-from notion import add_new_page, get_database_id, generate_page, get_deudores
+from notion import actualizar_deudor_deuda, add_new_page, generate_deudor, get_data_source_id, get_database_id, generate_page, get_deudor_deuda, get_deudores
 from datetime import datetime
 from threading import Thread
-from flask import Flask, request
+from flask import Flask
 
 # === Cargar variables .env ===
 load_dotenv()
@@ -140,6 +139,33 @@ def call_gpt_extract(msg_text):
     txt = resp.choices[0].message.content.strip()
     return parse_json_strict(txt)
 
+def call_gpt_deuda_deudor(msg_text):
+    system_prompt = (
+        "Eres un extractor estricto de finanzas personales en Colombia. "
+        "Devuelves SOLO JSON con estas claves exactas: "
+        "{'detalle','valor','tipo'}. "
+        "Reglas: "
+        "- JSON válido, sin texto adicional. "
+        "- NO infieras fecha ni hora: si el usuario no las menciona explícitamente, deja \"fecha\" y/o \"hora\" como string vacío. "
+        "- Moneda por defecto COP; normaliza '28.500' → 28500 (entero). "
+        "- 'valor' es un numero referente a pesos colombianos "
+        "- 'detalle' es description breve. "
+        "- 'tipo' es el tipo de transaccion puede ser 'deuda', 'deudor', 'pago' o 'abono' y debe estar al principio del texto en caso de no estar pon, gasto"
+        "- No incluyas explicaciones ni comentarios, solo el JSON."
+    )
+    user_prompt = f'Texto: "{msg_text}"'
+
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        temperature=0.1,
+        messages=[
+            {"role":"system","content":system_prompt},
+            {"role":"user","content":user_prompt}
+        ]
+    )
+    txt = resp.choices[0].message.content.strip()
+    return parse_json_strict(txt)
+
 # === Normalización: fecha/hora vacías o inválidas -> ahora; valor -> entero COP ===
 def normalize_record(rec):
     now = dt.datetime.now(TZ)
@@ -213,97 +239,108 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "-Para agregar gasto obligatorio: 💰 valor, 📝 descripción (categoría/subcategoría/detalle) y 🏦 cuenta.\n"
         "Ejemplos: 'Uber 7.820 a la oficina, colpatria', 'Nendoroid 200000 en Amazon japon, nu'\n-----------------\n"
         "Guardaré todo en tu Google Sheets 'gastos_diarios' y en Notion.\n"
-        "-Para agregar un deudor: incluye la palabra DEUDOR. Ejemplo: 'Deudor luis netflix julio 15000'.\n-----------------\n"
-        "-Para agregar un abono de deudor: usar /deudores para saber los que hay y luego pasa la misma descripcion y usa la palabra ABONO.\n-----------------\n"
-        "Ejemplo: 'abono luis netflix julio 15000'.\n"
-        "-Para agregar una deuda: incluye la palabra DEUDA. Ejemplo: 'Deuda novaventa 18.000'.\n-----------------\n"
-        "-Para agregar un pago a deuda: usar /deudas para saber los que hay y luego pasa la misma descripcion y usa la palabra PAGO.\n-----------------\n"
-        "Ejemplo: 'pago novaventa 15000'.\n"
+        "-Para agregar un deudor: incluye la palabra **DEUDOR**. Ejemplo: 'Deudor luis netflix julio 15000'.\n-----------------\n"
+        "-Para agregar un abono de deudor: usar /deudores para saber los que hay y luego pasa la misma descripcion y usa la palabra **ABONO**.\n"
+        "Ejemplo: 'abono luis netflix julio 15000'.\n-----------------\n"
+        "-Para agregar una deuda: incluye la palabra **DEUDA**. Ejemplo: 'Deuda novaventa 18.000'.\n-----------------\n"
+        "-Para agregar un pago a deuda: usar /deudas para saber los que hay y luego pasa la misma descripcion y usa la palabra **PAGO**.\n"
+        "Ejemplo: 'pago novaventa 15000'.\n-----------------\n"
     )
 
 async def deudores(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_id = await get_database_id(year)
-    deudores_list = await get_deudores(db_id[2])
+    data_source_id = await get_data_source_id(db_id[2])
+    deudores_list = await get_deudores(data_source_id)
     await update.message.reply_text(deudores_list)
     
 async def deudas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_id = await get_database_id(year)
-    deudores_list = await get_deudores(db_id[1])
+    data_source_id=await get_data_source_id(db_id[1])
+    deudores_list = await get_deudores(data_source_id)
     await update.message.reply_text(deudores_list)
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    try:
-        rec = call_gpt_extract(text)
-        if not rec:
-            await update.message.reply_text("😅 No pude entender el gasto. Decime el monto y una descripción corta (ej: 'comida almuerzo 28000').")
-            return
+# actualizando tablas
+async def add_deudor_deuda(update: Update, tipo, detalle, total):
+    page = generate_deudor(detalle, total)
+    db = await get_database_id(year)
+    db_id = db[2] if tipo=="deudor" else db[1]
+    await add_new_page(db_id, page)
+    await update.message.reply_text(f"{tipo.capitalize()} {detalle} {total} registrado correctamente.")
 
-        rec = normalize_record(rec)
-
-        # Validación obligatoria
-        if not rec["valor"]:
-            await update.message.reply_text("💰 Me falta el valor del gasto. Enviame el monto (ej: 25000 o 28.500).")
-            return
-        if not has_required_description(rec):
-            await update.message.reply_text("📝 Necesito una descripción/categoría. Decime algo como: 'comida/almuerzo', 'transporte/taxi' o un detalle corto.")
-            return
-        if not rec["cuenta"]:
-            await update.message.reply_text("🏦 Me falta la cuenta de donde salió el dinero. Por favor indícala (ej: colpatria, nu, rappi card, nequi, rappi cuenta).")
-            return
-
-        # Reglas de negocio
-        rec = enforce_business_rules(rec)
-
-        # Guardar
-        persist_to_gsheets(rec)
-        await add_to_notion(rec)
-
-        await update.message.reply_text(
-            f"✅ Guardado: {rec['categoria']} / {rec['subcategoria']} | ${rec['valor']} | {rec['fecha']} {rec['hora']}"
-            + (f" | {rec['comercio']}" if rec.get('comercio') else "")
-            + (f" | {rec['cuenta']}" if rec.get('cuenta') else "")
-        )
-
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
-
-# --- Servidor Flask “dummy” ---
-WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL")  # Render la crea automáticamente
-PORT = int(os.environ.get("PORT", 8080))
-
-app = Flask(__name__)
-bot_app = None  # se inicializa luego
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("¡Bot activo y listo en Render! 🟢")
+async def add_abono_pago(update: Update,tipo,detalle, pago):
+    db = await get_database_id(year)
+    db_id = db[2] if tipo=="abono" else db[1]
+    data_source_id = await get_data_source_id(db_id)
+    await actualizar_deudor_deuda(data_source_id, detalle, pago)
+    await update.message.reply_text(f"{tipo.capitalize()} {detalle} {pago} registrada correctamente.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Recibí: {update.message.text}")
+    text = update.message.text.strip()    
+    res = call_gpt_deuda_deudor(text)
+    if(res is None):
+        await update.message.reply_text("😅 No pude entender tu peticion, lee de nuevo las instrucciones")
+    elif((res['tipo'].lower() == "deudor" )or (text.lower().startswith("deuda"))):
+        if(not res['valor']):
+            await update.message.reply_text("💰 Me falta el valor de la deuda/deudor. Enviame el monto (ej: 25000 o 28.500).")
+            return
+        if(not res['detalle']):
+            await update.message.reply_text("📝 Necesito detalle de la deuda/deudor. Decime algo como: 'luis amazon', etc.")
+            return
+        await add_deudor_deuda(update, res['tipo'].lower(), res['detalle'], res['valor'])
+    elif((res['tipo'].lower() == "abono") or (text.lower().startswith("pago"))):
+        if(not res['valor']):
+            await update.message.reply_text("💰 Me falta el valor del pago/abbono. Enviame el monto (ej: 25000 o 28.500).")
+            return
+        if(not res['detalle']):
+            await update.message.reply_text("📝 Necesito detalle de la deuda/deudor. Decime algo como: 'luis amazon', etc.")
+            return
+        print(res['valor'])
+        await add_abono_pago(update, res['tipo'].lower(), res['detalle'], res['valor'])
+    elif res['tipo'].lower() == "gasto":
+        try:
+            rec = call_gpt_extract(text)
+            if not rec:
+                await update.message.reply_text("😅 No pude entender el gasto. Decime el monto y una descripción corta (ej: 'comida almuerzo 28000').")
+                return
 
-@app.route("/")
-def home():
-    return "Bot de Telegram activo en Render 🟢"
+            rec = normalize_record(rec)
 
-@app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
-def receive_update():
-    update = Update.de_json(request.get_json(force=True), bot_app.bot)
-    asyncio.run(bot_app.process_update(update))
-    return "ok"
+            # Validación obligatoria
+            if not rec["valor"]:
+                await update.message.reply_text("💰 Me falta el valor del gasto. Enviame el monto (ej: 25000 o 28.500).")
+                return
+            if not has_required_description(rec):
+                await update.message.reply_text("📝 Necesito una descripción/categoría. Decime algo como: 'comida/almuerzo', 'transporte/taxi' o un detalle corto.")
+                return
+            if not rec["cuenta"]:
+                await update.message.reply_text("🏦 Me falta la cuenta de donde salió el dinero. Por favor indícala (ej: colpatria, nu, rappi card, nequi, rappi cuenta).")
+                return
 
-async def setup_webhook():
-    webhook_url = f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}"
-    await bot_app.bot.set_webhook(url=webhook_url)
-    print(f"Webhook configurado en {webhook_url}")
+            # Reglas de negocio
+            rec = enforce_business_rules(rec)
+
+            # Guardar
+            persist_to_gsheets(rec)
+            await add_to_notion(rec)
+
+            await update.message.reply_text(
+                f"✅ Guardado: {rec['categoria']} / {rec['subcategoria']} | ${rec['valor']} | {rec['fecha']} {rec['hora']}"
+                + (f" | {rec['comercio']}" if rec.get('comercio') else "")
+                + (f" | {rec['cuenta']}" if rec.get('cuenta') else "")
+            )
+
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
 
 def main():
-    global bot_app
-    bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    asyncio.run(setup_webhook())
-    app.run(host="0.0.0.0", port=PORT)
+    asyncio.set_event_loop(asyncio.new_event_loop())
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("deudores", deudores))
+    app.add_handler(CommandHandler("deudas", deudas))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.run_polling()
 
 if __name__ == "__main__":
     main()

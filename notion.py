@@ -69,6 +69,32 @@ def generate_page(detalle, categoria, subcategoria, valor, comercio, cuenta, fec
   }
   return page
 
+def generate_deudor(detalle, total):
+  page = {
+    "total":{
+        "type":"number",
+        "number":total
+    },
+    "pagado":{
+        "type":"number",
+        "number":0
+    },
+    "Detalle":{
+        "id":"title",
+        "type":"title",
+        "title":[
+          {
+              "type":"text",
+              "text":{
+                "content":detalle,
+              }
+          }
+        ]
+    }
+  }
+  return page
+
+
 def add_new_page(dbId, page):
   query = {
       "parent": {
@@ -78,13 +104,19 @@ def add_new_page(dbId, page):
   }
   return notion.pages.create(**query)
 
+# use on queries
+async def get_data_source_id(database_id):
+  res = await notion.databases.retrieve(database_id=database_id)
+  return res['data_sources'][0]['id']
+
 async def get_database_id(year):
-  res = await notion.databases.query(database_id=finances_db_id, filter={
+  id = await get_data_source_id(finances_db_id)
+  res = await notion.data_sources.query(**{"data_source_id":id, "filter":{
     "property": "Year",
     "title": {
         "equals": year
     }
-  })
+  }})
   res_properties = res['results'][0]['properties']
   id_gastos =res_properties['id_gastos']['rich_text'][0]['text']['content']
   id_deudas =res_properties['id_deudas']['rich_text'][0]['text']['content']
@@ -101,13 +133,41 @@ def map_deudores(deudores):
     text +=  f"Detalle: {title} Total: {total} Pagado: {pagado} Restante: {restante}\n-----------------\n"
   return text  
 
-async def get_deudores(db_id):
-  res = await notion.databases.query(database_id=db_id, filter={
-    "property": "restante",
-    "number": {
-        "does_not_equal": 0
+async def get_deudores(data_source_id):
+  res = await notion.data_sources.query(
+    **{
+      "data_source_id": data_source_id,
+      "filter": {
+        "property": "restante",
+        "number": {
+            "does_not_equal": 0
+        }
+      }
     }
-    })
-  text = map_deudores(res['results'])
+  )
+  text = 'No se encontraron entradas' if len(res['results']) == 0 else map_deudores(res['results'])
   return text
 
+async def get_deudor_deuda(data_source_id, detalle):
+  return await notion.data_sources.query(**{"data_source_id":data_source_id, "filter":{
+    "property": "Detalle",
+    "title": {
+        "equals": detalle
+    }
+}})
+
+async def page_update(id, page):
+  return await notion.pages.update(page_id=id, properties=page)
+
+async def actualizar_deudor_deuda(data_source_id,detalle, pago):
+  page = await get_deudor_deuda(data_source_id, detalle)
+  page_id = page['results'][0]['id']
+  pagado =page['results'][0]["properties"]["pagado"]["number"]
+  print(f"pagado actual: {pagado}, nuevo pago: {pago}")
+  update = {
+      "pagado":{
+          "type":"number",
+          "number":int(pagado)+int(pago)
+      }
+  }
+  await page_update(page_id, update)
