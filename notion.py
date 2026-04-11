@@ -6,6 +6,14 @@ load_dotenv()
 notion = AsyncClient(auth=os.getenv("NOTION_TOKEN"))
 finances_db_id = os.getenv("FINANCES_PAGE_TABLE")
 
+def format_number_with_decimals(number):
+  """Formats a number to have a decimal point and thousand separators.
+  Example: 100000 -> '100,000.00'
+           1234567.89 -> '1,234,567.89'
+  """
+  # Use f-string formatting with ',' for thousand separator and '.2f' for two decimal places
+  return f"{number:,}"
+
 def generate_page(detalle, categoria, subcategoria, valor, comercio, cuenta, fecha):
   page = {
       "Detalle":{
@@ -130,7 +138,7 @@ def map_deudores(deudores):
     total = deudor['properties']['total']['number']
     pagado = deudor['properties']['pagado']['number']
     restante = deudor['properties']['restante']['formula']['number']    
-    text +=  f"Detalle: {title} Total: {total} Pagado: {pagado} Restante: {restante}\n-----------------\n"
+    text +=  f"Detalle: {title} Total: {format_number_with_decimals(total)} Pagado: {format_number_with_decimals(pagado)} Restante: {format_number_with_decimals(restante)}\n-----------------\n"
   return text  
 
 async def get_deudores(data_source_id):
@@ -171,3 +179,44 @@ async def actualizar_deudor_deuda(data_source_id,detalle, pago):
       }
   }
   await page_update(page_id, update)
+
+def map_expences(expences):
+  text = ""
+  for expence in expences:
+    detalle = expence['properties']['Detalle']['title'][0]['text']['content']
+    valor = expence['properties']['Valor']['number']
+    fecha = expence['properties']['Date']['date']['start'].split("T")[0]
+    text += f"Detalle: {detalle}\nValor: {format_number_with_decimals(valor)}\nFecha: {fecha}\n-----------------\n"
+  return text
+
+async def get_month_expences(data_source_id,firstOfMonth):  
+   res = await notion.data_sources.query(
+    **{
+      "data_source_id": data_source_id,
+      "filter": {
+        "and": [
+          {
+            "property": "Date",
+            "date": {
+              "on_or_before": 'today'
+            }
+          },
+          {
+            "property": "Date",
+            "date": {
+              "on_or_after": firstOfMonth
+            }
+          }
+        ]
+      }
+    }
+  )
+   text = 'No se encontraron entradas' if len(res['results']) == 0 else res['results']
+   return text
+
+def get_month_valance(data):
+  sum=0
+  for i in data:
+    sum+=i['properties']['Valor']['number']
+  return sum
+

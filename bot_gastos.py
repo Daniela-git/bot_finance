@@ -9,7 +9,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Con
 from openai import OpenAI
 import gspread
 from google.oauth2.service_account import Credentials
-from notion import actualizar_deudor_deuda, add_new_page, generate_deudor, get_data_source_id, get_database_id, generate_page, get_deudor_deuda, get_deudores
+from notion import actualizar_deudor_deuda, add_new_page, generate_deudor, get_data_source_id, get_database_id, generate_page, get_deudor_deuda, get_deudores, get_month_expences, get_month_valance, map_expences
 from datetime import datetime
 from threading import Thread
 from flask import Flask
@@ -112,6 +112,14 @@ def is_valid_time(s: str) -> bool:
         return 0 <= int(hh) <= 23 and 0 <= int(mm) <= 59
     except Exception:
         return False
+
+def format_number_with_decimals(number):
+  """Formats a number to have a decimal point and thousand separators.
+  Example: 100000 -> '100,000.00'
+           1234567.89 -> '1,234,567.89'
+  """
+  # Use f-string formatting with ',' for thousand separator and '.2f' for two decimal places
+  return f"{number:,}"
 
 # === Parseo de JSON estricto desde la respuesta de GPT ===
 def parse_json_strict(text):
@@ -281,6 +289,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "-Para agregar una deuda: incluye la palabra **DEUDA**. Ejemplo: 'Deuda novaventa 18.000'.\n-----------------\n"
         "-Para agregar un pago a deuda: usar /deudas para saber los que hay y luego pasa la misma descripcion y usa la palabra **PAGO**.\n"
         "Ejemplo: 'pago novaventa 15000'.\n-----------------\n"
+        "-Para mirar cuanto se ha gastado en el mes: usar /gastos.\n"
+        "-Para mirar todos los gastos del mes: usar /balance.\n"
     )
     print(f"[DEBUG] Mensaje de inicio enviado")
 
@@ -315,7 +325,7 @@ async def add_deudor_deuda(update: Update, tipo, detalle, total):
     print(f"[DEBUG] Agregando página a Notion...")
     await add_new_page(db_id, page)
     print(f"[DEBUG] {tipo.capitalize()} registrado en Notion")
-    await update.message.reply_text(f"{tipo.capitalize()} {detalle} {total} registrado correctamente.")
+    await update.message.reply_text(f"{tipo.capitalize()} {detalle} {format_number_with_decimals(int(total))} registrado correctamente.")
 
 async def add_abono_pago(update: Update,tipo,detalle, pago):
     print(f"[DEBUG] Procesando {tipo} para {detalle}")
@@ -326,7 +336,32 @@ async def add_abono_pago(update: Update,tipo,detalle, pago):
     print(f"[DEBUG] Data source ID obtenido: {data_source_id}")
     await actualizar_deudor_deuda(data_source_id, detalle, pago)
     print(f"[DEBUG] {tipo.capitalize()} actualizado en Notion")
-    await update.message.reply_text(f"{tipo.capitalize()} {detalle} {pago} registrada correctamente.")
+    await update.message.reply_text(f"{tipo.capitalize()} {detalle} {format_number_with_decimals(int(pago))} registrada correctamente.")
+
+async def month_valance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    valor=4500000
+    first_of_month = dt.datetime.now(TZ).replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d')
+    print(f"[DEBUG] Comando /gastos ejecutado")
+    db_id = await get_database_id(year)
+    print(f"[DEBUG] DB ID obtenido: {db_id}")
+    data_source_id = await get_data_source_id(db_id[0])
+    print(f"[DEBUG] Data source ID obtenido: {data_source_id}")
+    gastos=await get_month_expences(data_source_id,first_of_month)
+    valance=get_month_valance(gastos)
+    print(f"[DEBUG] Valance optenido: {valance}")
+    await update.message.reply_text(f"Gastos del mes: {format_number_with_decimals(valance)}\n-----------------\n{format_number_with_decimals(valor-valance)} disponible")
+
+async def month_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    first_of_month = dt.datetime.now(TZ).replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d')
+    print(f"[DEBUG] Comando /gastos ejecutado")
+    db_id = await get_database_id(year)
+    print(f"[DEBUG] DB ID obtenido: {db_id}")
+    data_source_id = await get_data_source_id(db_id[0])
+    print(f"[DEBUG] Data source ID obtenido: {data_source_id}")
+    gastos=await get_month_expences(data_source_id,first_of_month)
+    mapped_gastos = map_expences(gastos)
+    print(f"[DEBUG] Gastos del mes obtenidos: {gastos}")
+    await update.message.reply_text(mapped_gastos)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -403,7 +438,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             print(f"[DEBUG] Agregado a Notion exitosamente")
 
             await update.message.reply_text(
-                f"✅ Guardado: {rec['categoria']} | ${rec['valor']} | {rec['fecha']} {rec['hora']}"
+                f"✅ Guardado: {rec['categoria']} | ${format_number_with_decimals(int(rec['valor']))} | {rec['fecha']} {rec['hora']}"
                 + (f" | {rec['comercio']}" if rec.get('comercio') else "")
                 + (f" | {rec['cuenta']}" if rec.get('cuenta') else "")
             )
@@ -423,6 +458,8 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("deudores", deudores))
     app.add_handler(CommandHandler("deudas", deudas))
+    app.add_handler(CommandHandler("balance", month_valance))
+    app.add_handler(CommandHandler("gastos", month_expenses))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     print("[DEBUG] Handlers registrados. Iniciando polling...")
     app.run_polling()
