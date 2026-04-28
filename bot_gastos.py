@@ -68,6 +68,11 @@ def get_or_create_sheet():
 
 async def add_to_notion(rec):
     print(f"[DEBUG] Preparando registro para Notion: {rec}")
+    if not rec.get("fecha"):
+        print(f"[DEBUG] Fecha u hora faltante, usando fecha/hora actual")
+        fecha = datetime.strptime(f"{rec['fecha']} {rec['hora']}", "%Y-%m-%d %H:%M")
+    else:
+        print(f"[DEBUG] Fecha y hora proporcionadas: {rec['fecha']} {rec['hora']}")
     fecha = datetime.strptime(f"{rec['fecha']} {rec['hora']}", "%Y-%m-%d %H:%M")
     print(f"[DEBUG] Fecha parseada para Notion: {fecha}")
 
@@ -138,12 +143,11 @@ def call_gpt_extract(msg_text):
     system_prompt = (
         "Eres un extractor estricto de gastos personales en Colombia. "
         "Devuelves SOLO JSON con estas claves exactas: "
-        "{'fecha','hora','valor','comercio','categoria','detalle', 'cuenta'}. "
+        "{'fecha','valor','categoria','detalle', 'cuenta'}. "
         "Reglas: "
         "- JSON válido, sin texto adicional. "
-        "- NO infieras fecha ni hora: si el usuario no las menciona explícitamente, deja \"fecha\" y/o \"hora\" como string vacío. "
+        f"- NO infieras fecha ni hora: si el usuario no las menciona explícitamente, deja \"fecha\" y/o \"hora\" como string vacío, el usuario puede pasar la fecha como en muchos formatos toma esa fecha y retorna dia, mes, año separado por guion, si no pasa año usa {year}, si no pasa fecha deja fecha vacía."
         "- Moneda por defecto COP; normaliza '28.500' → 28500 (entero). "
-        "- 'comercio' es comercio/lugar/tienda/app si se menciona. "
         "- 'categoria' concisas ('comida', 'transporte', 'videojuego', 'figuras', etc.). "
         "- 'detalle' es descripción breve, puede ser solo una palabra o multiples palabras puede ser incluso solo en nombre del comercio como Amazon, Temu, steam. "
         "- 'cuenta' es el nombre de la cuenta donde salio el dinero posibles opciones son colpatria, nu, rappi card, nequi, rappi cuenta, etc."
@@ -170,10 +174,10 @@ def call_gpt_deuda_deudor(msg_text):
     system_prompt = (
         "Eres un extractor estricto de finanzas personales en Colombia. "
         "Devuelves SOLO JSON con estas claves exactas: "
-        "{'detalle','valor','tipo'}. "
+        "{'detalle','valor','tipo', 'fecha'}."
         "Reglas: "
         "- JSON válido, sin texto adicional. "
-        "- NO infieras fecha ni hora: si el usuario no las menciona explícitamente, deja \"fecha\" y/o \"hora\" como string vacío. "
+        f"- NO infieras fecha ni hora: si el usuario no las menciona explícitamente, deja \"fecha\" y/o \"hora\" como string vacío, el usuario puede pasar la fecha como en muchos formatos toma esa fecha y retorna dia, mes, año separado por guion, si no pasa año usa {year}, si no pasa fecha deja fecha vacía."
         "- Moneda por defecto COP; normaliza '28.500' → 28500 (entero). "
         "- 'valor' es un numero referente a pesos colombianos "
         "- 'detalle' es description breve. "
