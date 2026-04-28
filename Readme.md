@@ -2,10 +2,11 @@
 ssh USER@raspberrypi.local
 
 2. To pull the chages 
-cd bot_finances
+cd bot_finance
 git pull
 
 3. Restart the bot to reflect the changes
+cd ..
 sudo systemctl restart bot_finance.service
 
 4. Validate bot status
