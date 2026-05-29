@@ -31,6 +31,18 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # === Google Sheets helpers ===
 HEADERS = ["fecha","hora","valor","comercio","categoria","subcategoria","detalle", "cuenta"]
 
+chatgpt_context =( "Eres un extractor estricto de gastos personales en Colombia. "
+        "Devuelves SOLO JSON con estas claves exactas: "
+        "{'fecha','valor','categoria','detalle', 'cuenta'}. "
+        "Reglas: "
+        "- JSON válido, sin texto adicional. "
+        f"- NO infieras fecha ni hora: si el usuario no las menciona explícitamente, deja \"fecha\" y/o \"hora\" como string vacío, el usuario puede pasar la fecha como en muchos formatos toma esa fecha y retorna dia, mes, año separado por guion, si no pasa año usa {year}, si no pasa fecha deja fecha vacía."
+        "- Moneda por defecto COP; normaliza '28.500' → 28500 (entero). "
+        "- 'categoria' hay 5 categorias unicas: hobbies (todo lo relacionado con figuras, lego, funkos, nendoroid, videojuegos, amiibos, comics, manga,cosas de ese estilo), comida (restaurantes, supermercados, domicilios, etc), obligaciones (servicios, suscripciones, impuestos y pagos de empresas de credito como sistecredito, addi, credifin y mas almacenes y cosas medicas, cosas de belleza no va en esta categoria), compras personales (todas las compras que no sean en las otras categorias, no incluye cosas como servicios o no cosas de belleza como uñas y cejas) y otros (lo que no encaje en las demas)"
+        "- 'detalle' es descripción breve, puede ser solo una palabra o multiples palabras puede ser incluso solo en nombre del comercio como Amazon, Temu, steam. "
+        "- 'cuenta' es el nombre de la cuenta donde salio el dinero posibles opciones son colpatria, nu, rappi card, nequi, rappi cuenta, etc."
+        "- No incluyas explicaciones ni comentarios, solo el JSON.")
+
 # --- Soporte para credencial desde variable de entorno ---
 def ensure_sa_file():
     print(f"[DEBUG] Verificando archivo service_account.json...")
@@ -140,19 +152,7 @@ def parse_json_strict(text):
 # === Llamada a GPT: NO inferir fecha/hora; dejarlas vacías si no están en el texto ===
 def call_gpt_extract(msg_text):
     print(f"[DEBUG] Llamando GPT para extraer gasto de: {msg_text}")
-    system_prompt = (
-        "Eres un extractor estricto de gastos personales en Colombia. "
-        "Devuelves SOLO JSON con estas claves exactas: "
-        "{'fecha','valor','categoria','detalle', 'cuenta'}. "
-        "Reglas: "
-        "- JSON válido, sin texto adicional. "
-        f"- NO infieras fecha ni hora: si el usuario no las menciona explícitamente, deja \"fecha\" y/o \"hora\" como string vacío, el usuario puede pasar la fecha como en muchos formatos toma esa fecha y retorna dia, mes, año separado por guion, si no pasa año usa {year}, si no pasa fecha deja fecha vacía."
-        "- Moneda por defecto COP; normaliza '28.500' → 28500 (entero). "
-        "- 'categoria' concisas ('comida', 'transporte', 'videojuego', 'figuras', etc.). "
-        "- 'detalle' es descripción breve, puede ser solo una palabra o multiples palabras puede ser incluso solo en nombre del comercio como Amazon, Temu, steam. "
-        "- 'cuenta' es el nombre de la cuenta donde salio el dinero posibles opciones son colpatria, nu, rappi card, nequi, rappi cuenta, etc."
-        "- No incluyas explicaciones ni comentarios, solo el JSON."
-    )
+    system_prompt = chatgpt_context
     user_prompt = f'Texto: "{msg_text}"'
 
     resp = client.chat.completions.create(

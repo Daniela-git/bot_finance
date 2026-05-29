@@ -34,14 +34,11 @@ def generate_page(detalle, categoria, subcategoria, valor, comercio, cuenta, fec
         }
     },
     "Categoria":{
-        "type":"rich_text",
-        "rich_text":[
+        "type":"select",
+        "select":
           {
-              "text":{
-                "content":categoria,
-              }
-          }        
-      ]
+              "name": categoria,
+          }     
     },
     "Valor":{
         "type":"number",
@@ -52,28 +49,7 @@ def generate_page(detalle, categoria, subcategoria, valor, comercio, cuenta, fec
         "date":{
           "start":fecha,
         }
-    },
-    "Comercio":{
-        "type":"rich_text",
-        "rich_text":[
-          {
-              "text":{
-                "content":comercio,
-              },
-          }]
-    },
-    "Subcategoria":{
-        "id":"rgbW",
-        "type":"rich_text",
-        "rich_text":[
-          {
-              "text":{
-                "content":subcategoria,
-              }
-          }
-        ]
-    },
-    
+    },    
   }
   return page
 
