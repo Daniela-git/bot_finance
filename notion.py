@@ -78,6 +78,32 @@ def generate_deudor(detalle, total):
   }
   return page
 
+def generate_extra_allowance(detalle, valor, fecha):
+  page = {
+    "Valor":{
+        "type":"number",
+        "number":valor
+    },
+    "Date":{
+        "type":"date",
+        "date":{
+          "start":fecha,
+        }
+    },
+    "Detalle":{
+        "id":"title",
+        "type":"title",
+        "title":[
+          {
+              "type":"text",
+              "text":{
+                "content":detalle,
+              }
+          }
+        ]
+    }
+  }
+  return page
 
 def add_new_page(dbId, page):
   query = {
@@ -105,7 +131,8 @@ async def get_database_id(year):
   id_gastos =res_properties['id_gastos']['rich_text'][0]['text']['content']
   id_deudas =res_properties['id_deudas']['rich_text'][0]['text']['content']
   id_deudores=res_properties['id_deudores']['rich_text'][0]['text']['content']
-  return [id_gastos, id_deudas, id_deudores]
+  id_extra=res_properties['id_extra']['rich_text'][0]['text']['content']
+  return [id_gastos, id_deudas, id_deudores, id_extra]
 
 def map_deudores(deudores):
   text = ""
@@ -190,7 +217,32 @@ async def get_month_expences(data_source_id,firstOfMonth):
    text = 'No se encontraron entradas' if len(res['results']) == 0 else res['results']
    return text
 
-def get_month_valance(data):
+async def get_extra_allowances_month(data_source_id,firstOfMonth):  
+   res = await notion.data_sources.query(
+    **{
+      "data_source_id": data_source_id,
+      "filter": {
+        "and": [
+          {
+            "property": "Date",
+            "date": {
+              "on_or_before": 'today'
+            }
+          },
+          {
+            "property": "Date",
+            "date": {
+              "on_or_after": firstOfMonth
+            }
+          }
+        ]
+      }
+    }
+  )
+   result = 0 if len(res['results']) == 0 else res['results']
+   return result
+
+def sum_valor_data(data):
   sum=0
   for i in data:
     sum+=i['properties']['Valor']['number']

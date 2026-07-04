@@ -9,7 +9,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Con
 from openai import OpenAI
 import gspread
 from google.oauth2.service_account import Credentials
-from notion import actualizar_deudor_deuda, add_new_page, generate_deudor, get_data_source_id, get_database_id, generate_page, get_deudor_deuda, get_deudores, get_month_expences, get_month_valance, map_expences
+from notion import actualizar_deudor_deuda, add_new_page, generate_deudor, generate_extra_allowance, get_data_source_id, get_database_id, generate_page, get_deudor_deuda, get_deudores, get_extra_allowances_month, get_month_expences, map_expences, sum_valor_data
 from datetime import datetime
 from threading import Thread
 from flask import Flask
@@ -181,7 +181,7 @@ def call_gpt_deuda_deudor(msg_text):
         "- Moneda por defecto COP; normaliza '28.500' → 28500 (entero). "
         "- 'valor' es un numero referente a pesos colombianos "
         "- 'detalle' es description breve. "
-        "- 'tipo' es el tipo de transaccion puede ser '-deuda', '-deudor', '-pago' o '-abono' y debe estar al principio del texto, en caso de no estar pon, solo 'gasto' sin nada extra'"
+        "- 'tipo' es el tipo de transaccion puede ser '-deuda', '-deudor', '-pago', '-dinero' o '-abono' y debe estar al principio del texto, en caso de no estar pon, solo 'gasto' sin nada extra'"
         "- No incluyas explicaciones ni comentarios, solo el JSON."
     )
     user_prompt = f'Texto: "{msg_text}"'
@@ -293,8 +293,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "-Para agregar una deuda: incluye la palabra **DEUDA**. Ejemplo: 'Deuda novaventa 18.000'.\n-----------------\n"
         "-Para agregar un pago a deuda: usar /deudas para saber los que hay y luego pasa la misma descripcion y usa la palabra **PAGO**.\n"
         "Ejemplo: 'pago novaventa 15000'.\n-----------------\n"
-        "-Para mirar cuanto se ha gastado en el mes: usar /gastos.\n"
-        "-Para mirar todos los gastos del mes: usar /balance.\n"
+        "-Para agregar un dinero extra: usar **-dinero** al principio del mensaje luego pasar de que es y el valor.\n"        
+        "-Para mirar cuanto se ha gastado en el mes: usar /balance.\n"
+        "-Para mirar todos los gastos del mes: usar /gastos.\n"
     )
     print(f"[DEBUG] Mensaje de inicio enviado")
 
@@ -342,6 +343,24 @@ async def add_abono_pago(update: Update,tipo,detalle, pago):
     print(f"[DEBUG] {tipo.capitalize()} actualizado en Notion")
     await update.message.reply_text(f"{tipo.capitalize()} {detalle} {format_number_with_decimals(int(pago))} registrada correctamente.")
 
+async def add_dinero_extra(update: Update, rec):
+    print(f"[DEBUG] Procesando dinero extra para {rec}")
+    if not rec.get("fecha"):
+        print(f"[DEBUG] Fecha u hora faltante, usando fecha/hora actual")
+        fecha = datetime.strftime(datetime.now(), "%Y-%m-%dT%H:%M:%S.000Z")
+    else:
+        print(f"[DEBUG] Fecha y hora proporcionadas: {rec['fecha']} {rec['hora']}")
+        fecha = datetime.strptime(f"{rec['fecha']} {rec['hora']}", "%Y-%m-%d %H:%M")
+    print(f"[DEBUG] Fecha parseada para Notion: {fecha}")
+    page = generate_extra_allowance(rec['detalle'], rec['valor'], fecha)
+    db = await get_database_id(year)
+    db_id = db[3]
+    print(f"[DEBUG] DB ID obtenido: {db_id}")
+    print(f"[DEBUG] Agregando página a Notion...")
+    await add_new_page(db_id, page)
+    print(f"[DEBUG] dinero extra registrado en Notion")
+    await update.message.reply_text(f"dinero extra {rec['detalle']} {format_number_with_decimals(int(rec['valor']))} registrado correctamente.")
+
 async def month_valance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     valor=4500000
     first_of_month = dt.datetime.now(TZ).replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d')
@@ -351,9 +370,15 @@ async def month_valance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data_source_id = await get_data_source_id(db_id[0])
     print(f"[DEBUG] Data source ID obtenido: {data_source_id}")
     gastos=await get_month_expences(data_source_id,first_of_month)
-    valance=get_month_valance(gastos)
-    print(f"[DEBUG] Valance optenido: {valance}")
-    await update.message.reply_text(f"Gastos del mes: {format_number_with_decimals(valance)}\n-----------------\n{format_number_with_decimals(valor-valance)} disponible")
+    extra=await get_extra_allowances_month(await get_data_source_id(db_id[3]),first_of_month)
+    valance=sum_valor_data(gastos)
+    if(extra != 0):
+        total_extra=sum_valor_data(extra)
+    else: total_extra=0
+    total_disponible=valor+total_extra
+    print(f"[DEBUG] Valance obtenido: {valance}")
+    print(f"[DEBUG] Total disponible obtenido: {total_disponible}")
+    await update.message.reply_text(f"Gastos del mes: {format_number_with_decimals(valance)}\n-----------------\n{format_number_with_decimals(total_disponible-valance)} disponible")
 
 async def month_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     first_of_month = dt.datetime.now(TZ).replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d')
@@ -398,7 +423,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("📝 Necesito detalle de la deuda/deudor. Decime algo como: 'luis amazon', etc.")
             return
         print(f"[DEBUG] Agregando {res['tipo']}: {res['detalle']} - {res['valor']}")
-        await add_abono_pago(update, res['tipo'].lower(), res['detalle'], res['valor'])
+        await add_abono_pago(update, res['tipo'].lower(), res['detalle'], res['valor'])        
+    elif((res['tipo'].lower() == "-dinero")):
+        print(f"[DEBUG] Tipo detectado: {res['tipo']}")
+        if(not res['valor']):
+            print(f"[DEBUG] Falta valor del dinero extra")
+            await update.message.reply_text("💰 Me falta el valor del dinero extra. Enviame el monto (ej: 25000 o 28.500)")
+            return
+        if(not res['detalle']):
+            print(f"[DEBUG] Falta detalle en dinero extra")
+            await update.message.reply_text("📝 Necesito detalle del dinero extra. Decime algo como: 'luis amazon', etc.")
+            return
+        print(f"[DEBUG] Agregando {res['tipo']}: {res['detalle']} - {res['valor']}")
+        await add_dinero_extra(update, res)    
+
     elif res['tipo'].lower() == "gasto":
         print(f"[DEBUG] Tipo detectado: gasto")
         try:
