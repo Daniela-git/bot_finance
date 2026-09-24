@@ -29,7 +29,9 @@ year = str(fecha.year)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # === Google Sheets helpers ===
-HEADERS = ["fecha","hora","valor","comercio","categoria","subcategoria","detalle", "cuenta"]
+HEADERS = ["fecha","hora","valor","categoria","detalle", "cuenta"]
+HEADERS_ABONO = ['fecha',"hora","detalle","valor","pagado","restante"]
+HEADERS_EXTRA = ["detalle","valor","fecha","hora"]
 
 chatgpt_context =( "Eres un extractor estricto de gastos personales en Colombia. "
         "Devuelves SOLO JSON con estas claves exactas: "
@@ -64,49 +66,48 @@ def gspread_client():
     creds = Credentials.from_service_account_file(SA_JSON_PATH, scopes=scopes)
     return gspread.authorize(creds)
 
-def get_or_create_sheet():
+def get_or_create_sheet(tipo):
     print(f"[DEBUG] Conectando a Google Sheets: {SHEET_NAME}")
     gc = gspread_client()
     sh = gc.open(SHEET_NAME)
-    ws = sh.sheet1
+    if tipo == "abono" or tipo == "deudor":
+        ws = sh.worksheet("deudores")
+    elif tipo == "dinero":
+        ws = sh.worksheet("extra")
+    elif  tipo == "pago" or  tipo == "deuda":
+        ws = sh.worksheet("deudas")
+    elif  tipo == "mes":
+        ws = sh.worksheet("mes")        
+    else:
+        ws = sh.worksheet("gastos")  # Hoja por defecto
     first_row = ws.row_values(1)
     print(f"[DEBUG] Primera fila de la hoja: {first_row}")
-    if [h.lower() for h in first_row] != HEADERS:
-        print(f"[DEBUG] Headers no coinciden, limpiando y estableciendo nuevos...")
-        ws.clear()
-        ws.append_row(HEADERS)
-        print(f"[DEBUG] Headers establecidos correctamente")
     return ws
 
-async def add_to_notion(rec):
-    print(f"[DEBUG] Preparando registro para Notion: {rec}")
-    if not rec.get("fecha"):
-        print(f"[DEBUG] Fecha u hora faltante, usando fecha/hora actual")
-        fecha = datetime.strptime(f"{rec['fecha']} {rec['hora']}", "%Y-%m-%d %H:%M")
+def update_sheet_row(tipo, update_data):
+    ws = get_or_create_sheet(tipo)
+    data = ws.get_all_records()
+    for row_number, row in enumerate(data, start=2):
+        if row["detalle"] == update_data["detalle"]:      
+            print(row)
+            pagado =row["pagado"] or 0 
+            nuevo_pagado = pagado + update_data["valor"]
+            ws.update_cell(row_number, 5, nuevo_pagado)
+            ws.update_cell(row_number, 6, row["valor"] - nuevo_pagado)  
+            break
+
+def persist_to_gsheets(rec, tipo):
+    print(f"[DEBUG] Conectando a Google Sheets para guardar: {rec}")
+    ws = get_or_create_sheet(tipo)#modificar para que guarde en la hoja correcta segun el tipo
+    if tipo == "abono" or tipo == "pago" or tipo == "deudor" or tipo == "deuda":
+        row = [rec.get(k,"") for k in HEADERS_ABONO]
+    elif tipo == "dinero":
+        row = [rec.get(k,"") for k in HEADERS_EXTRA]
     else:
-        print(f"[DEBUG] Fecha y hora proporcionadas: {rec['fecha']} {rec['hora']}")
-    fecha = datetime.strptime(f"{rec['fecha']} {rec['hora']}", "%Y-%m-%d %H:%M")
-    print(f"[DEBUG] Fecha parseada para Notion: {fecha}")
-
-    page_data = generate_page(
-        detalle=rec["detalle"],
-        categoria=rec["categoria"],
-        subcategoria='',
-        valor=rec["valor"],
-        comercio=rec["comercio"],
-        cuenta=rec["cuenta"].lower() if rec["cuenta"] else "", 
-        fecha=fecha.isoformat()
-    )
-    print(f"[DEBUG] Datos de página generados para Notion")
-
-    print(f"[DEBUG] Obteniendo ID de base de datos para año {fecha.year}...")
-    db_id = await get_database_id(str(fecha.year))#id_gastos
-    print(f"[DEBUG] DB ID obtenido: {db_id}")
-
-    print(f"[DEBUG] Agregando página a Notion...")
-    await add_new_page(db_id[0], page_data)
-    print(f"[DEBUG] Página agregada a Notion exitosamente")
-    
+        row = [rec.get(k,"") for k in HEADERS]
+    print(f"[DEBUG] Fila a insertar: {row}")
+    ws.append_row(row, value_input_option="USER_ENTERED")
+    print(f"[DEBUG] Fila insertada exitosamente")
 
 # === Utilidades de validación de fecha/hora ===
 DATE_RX = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -178,10 +179,10 @@ def call_gpt_deuda_deudor(msg_text):
         "Reglas: "
         "- JSON válido, sin texto adicional. "
         f"- NO infieras fecha ni hora: si el usuario no las menciona explícitamente, deja \"fecha\" y/o \"hora\" como string vacío, el usuario puede pasar la fecha como en muchos formatos toma esa fecha y retorna dia, mes, año separado por guion, si no pasa año usa {year}, si no pasa fecha deja fecha vacía."
-        "- Moneda por defecto COP; normaliza '28.500' → 28500 (entero). "
+        "- Moneda por defecto COP; normaliza '28.500' → 28500 (entero). "        
+        "- 'tipo' es el tipo de transaccion puede ser 'deuda', 'deudor', 'pago', 'dinero' o 'abono' y debe estar al principio del texto, en caso de no estar pon, solo 'gasto' sin nada extra'"
         "- 'valor' es un numero referente a pesos colombianos "
-        "- 'detalle' es description breve. "
-        "- 'tipo' es el tipo de transaccion puede ser '-deuda', '-deudor', '-pago', '-dinero' o '-abono' y debe estar al principio del texto, en caso de no estar pon, solo 'gasto' sin nada extra'"
+        "- 'detalle' es description breve."
         "- No incluyas explicaciones ni comentarios, solo el JSON."
     )
     user_prompt = f'Texto: "{msg_text}"'
@@ -201,10 +202,11 @@ def call_gpt_deuda_deudor(msg_text):
     return result
 
 # === Normalización: fecha/hora vacías o inválidas -> ahora; valor -> entero COP ===
-def normalize_record(rec):
+def normalize_record(rec, tipo):
     print(f"[DEBUG] Normalizando registro inicial: {rec}")
     now = dt.datetime.now(TZ)
-
+    headers = HEADERS_ABONO if tipo in ["abono", "deudor", "deuda", "pago"] else HEADERS_EXTRA if tipo == "dinero" else HEADERS
+    print(headers)
     # valor -> entero
     val = rec.get("valor")
     if isinstance(val, str):
@@ -232,52 +234,15 @@ def normalize_record(rec):
     rec["hora"]  = hora
     print(f"[DEBUG] Fecha/hora normalizadas: {fecha} {hora}")
 
-    # strings seguros
-    for k in ["comercio","categoria","detalle"]:
-        rec[k] = (rec.get(k,"") or "").strip()
-
-    # asegurar todas las claves
-    for k in HEADERS:
+    for k in headers:
         rec.setdefault(k, "")
 
     print(f"[DEBUG] Registro después de normalización: {rec}")
     return rec
 
-# === Reglas de negocio personalizadas ===
-def enforce_business_rules(rec):
-    print(f"[DEBUG] Aplicando reglas de negocio al registro: {rec}")
-    """
-    Regla solicitada:
-    - Si categoria es 'alimentación'/'alimentacion'/'comida' y la hora está entre 18:00 y 02:00,
-      entonces subcategoria = 'cena' (forzado).
-    """
-    cat = (rec.get("categoria") or "").strip().lower()
-    hora = (rec.get("hora") or "00:00").strip()
-
-    try:
-        hh = int(hora.split(":")[0])
-    except Exception:
-        hh = -1  # fuerza a no coincidir si hora inválida, aunque normalmente ya está normalizada
-
-    if cat in ("alimentación", "alimentacion", "comida"):
-        # Ventana 18:00–23:59 o 00:00–01:59 (cruza medianoche)
-        if (hh >= 18) or (0 <= hh < 2):
-            print(f"[DEBUG] Detectada hora de cena ({hora}). Estableciendo subcategoria a 'cena'")
-            rec["subcategoria"] = "cena"
-
-    return rec
-
-def persist_to_gsheets(rec):
-    print(f"[DEBUG] Conectando a Google Sheets para guardar: {rec}")
-    ws = get_or_create_sheet()
-    row = [rec.get(k,"") for k in HEADERS]
-    print(f"[DEBUG] Fila a insertar: {row}")
-    ws.append_row(row, value_input_option="USER_ENTERED")
-    print(f"[DEBUG] Fila insertada exitosamente")
-
 # === Helpers de validación obligatoria ===
 def has_required_description(rec) -> bool:
-    return any(rec.get(k) for k in ("categoria", "subcategoria", "detalle"))
+    return any(rec.get(k) for k in ("categoria", "detalle"))
 
 # === Telegram Handlers ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -301,196 +266,115 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def deudores(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[DEBUG] Comando /deudores ejecutado")
-    db_id = await get_database_id(year)
-    print(f"[DEBUG] DB ID obtenido: {db_id}")
-    data_source_id = await get_data_source_id(db_id[2])
-    print(f"[DEBUG] Data source ID obtenido: {data_source_id}")
-    deudores_list = await get_deudores(data_source_id)
-    print(f"[DEBUG] Lista de deudores obtenida: {deudores_list}")
-    await update.message.reply_text(deudores_list)
+    ws = get_or_create_sheet('deudor')
+    data = ws.get_all_records()
+    text =""
+    for row_number, row in enumerate(data, start=2):
+        text +=  f"Detalle: {row['detalle']} Total: {format_number_with_decimals(row['valor'])} Pagado: {format_number_with_decimals(row['pagado'])} Restante: {format_number_with_decimals(row['restante'])}\n-----------------\n"     
+    await update.message.reply_text(text if text else "No se encontraron entradas")
     
 async def deudas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[DEBUG] Comando /deudas ejecutado")
-    db_id = await get_database_id(year)
-    print(f"[DEBUG] DB ID obtenido: {db_id}")
-    data_source_id=await get_data_source_id(db_id[1])
-    print(f"[DEBUG] Data source ID obtenido: {data_source_id}")
-    deudores_list = await get_deudores(data_source_id)
-    print(f"[DEBUG] Lista de deudas obtenida: {deudores_list}")
-    await update.message.reply_text(deudores_list)
-
-# actualizando tablas
-async def add_deudor_deuda(update: Update, tipo, detalle, total):
-    print(f"[DEBUG] Creando página para {tipo}: {detalle}")
-    page = generate_deudor(detalle, total)
-    print(f"[DEBUG] Obteniendo ID de base de datos para año {year}...")
-    db = await get_database_id(year)
-    db_id = db[2] if tipo=="-deudor" else db[1]
-    print(f"[DEBUG] DB ID obtenido: {db_id}")
-    print(f"[DEBUG] Agregando página a Notion...")
-    await add_new_page(db_id, page)
-    print(f"[DEBUG] {tipo.capitalize()} registrado en Notion")
-    await update.message.reply_text(f"{tipo.capitalize()} {detalle} {format_number_with_decimals(int(total))} registrado correctamente.")
-
-async def add_abono_pago(update: Update,tipo,detalle, pago):
-    print(f"[DEBUG] Procesando {tipo} para {detalle}")
-    db = await get_database_id(year)
-    db_id = db[2] if tipo=="-abono" else db[1]
-    print(f"[DEBUG] DB ID obtenido: {db_id}")
-    data_source_id = await get_data_source_id(db_id)
-    print(f"[DEBUG] Data source ID obtenido: {data_source_id}")
-    await actualizar_deudor_deuda(data_source_id, detalle, pago)
-    print(f"[DEBUG] {tipo.capitalize()} actualizado en Notion")
-    await update.message.reply_text(f"{tipo.capitalize()} {detalle} {format_number_with_decimals(int(pago))} registrada correctamente.")
-
-async def add_dinero_extra(update: Update, rec):
-    print(f"[DEBUG] Procesando dinero extra para {rec}")
-    if not rec.get("fecha"):
-        print(f"[DEBUG] Fecha u hora faltante, usando fecha/hora actual")
-        fecha = datetime.strftime(datetime.now(), "%Y-%m-%dT%H:%M:%S.000Z")
-    else:
-        print(f"[DEBUG] Fecha y hora proporcionadas: {rec['fecha']} {rec['hora']}")
-        fecha = datetime.strptime(f"{rec['fecha']} {rec['hora']}", "%Y-%m-%d %H:%M")
-    print(f"[DEBUG] Fecha parseada para Notion: {fecha}")
-    page = generate_extra_allowance(rec['detalle'], rec['valor'], fecha)
-    db = await get_database_id(year)
-    db_id = db[3]
-    print(f"[DEBUG] DB ID obtenido: {db_id}")
-    print(f"[DEBUG] Agregando página a Notion...")
-    await add_new_page(db_id, page)
-    print(f"[DEBUG] dinero extra registrado en Notion")
-    await update.message.reply_text(f"dinero extra {rec['detalle']} {format_number_with_decimals(int(rec['valor']))} registrado correctamente.")
+    ws = get_or_create_sheet('deuda')
+    data = ws.get_all_records()
+    text =""
+    for row_number, row in enumerate(data, start=2):
+        text +=  f"Detalle: {row['detalle']} Total: {format_number_with_decimals(row['valor'])} Pagado: {format_number_with_decimals(row['pagado'])} Restante: {format_number_with_decimals(row['restante'])}\n-----------------\n"     
+    await update.message.reply_text(text if text else "No se encontraron entradas")
 
 async def month_valance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     valor=4500000
-    first_of_month = dt.datetime.now(TZ).replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d')
-    print(f"[DEBUG] Comando /gastos ejecutado")
-    db_id = await get_database_id(year)
-    print(f"[DEBUG] DB ID obtenido: {db_id}")
-    data_source_id = await get_data_source_id(db_id[0])
-    print(f"[DEBUG] Data source ID obtenido: {data_source_id}")
-    gastos=await get_month_expences(data_source_id,first_of_month)
-    extra=await get_extra_allowances_month(await get_data_source_id(db_id[3]),first_of_month)
-    valance=sum_valor_data(gastos)
-    if(extra != 0):
-        total_extra=sum_valor_data(extra)
-    else: total_extra=0
+    print(f"[DEBUG] Comando /deudas ejecutado")
+    ws = get_or_create_sheet('dinero')
+    ws2 = get_or_create_sheet('mes')
+    total_extra = int(ws.acell('E2').value) or 0
+    total = int(ws2.acell('G2').value) or 0
+    print(f"[DEBUG] Total extra obtenido: {total_extra}")
     total_disponible=valor+total_extra
-    print(f"[DEBUG] Valance obtenido: {valance}")
+    print(f"[DEBUG] Valance obtenido: {total}")
     print(f"[DEBUG] Total disponible obtenido: {total_disponible}")
-    await update.message.reply_text(f"Gastos del mes: {format_number_with_decimals(valance)}\n-----------------\n{format_number_with_decimals(total_disponible-valance)} disponible")
+    await update.message.reply_text(f"Gastos del mes: {format_number_with_decimals(total)}\n-----------------\n{format_number_with_decimals(total_disponible-total)} disponible")
 
 async def month_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    first_of_month = dt.datetime.now(TZ).replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d')
-    print(f"[DEBUG] Comando /gastos ejecutado")
-    db_id = await get_database_id(year)
-    print(f"[DEBUG] DB ID obtenido: {db_id}")
-    data_source_id = await get_data_source_id(db_id[0])
-    print(f"[DEBUG] Data source ID obtenido: {data_source_id}")
-    gastos=await get_month_expences(data_source_id,first_of_month)
-    mapped_gastos = map_expences(gastos)
-    print(f"[DEBUG] Gastos del mes obtenidos: {gastos}")
-    await update.message.reply_text(mapped_gastos)
+    print(f"[DEBUG] Comando /deudas ejecutado")
+    ws = get_or_create_sheet('mes')
+    data = ws.get_all_records()
+    text =""
+    for row_number, row in enumerate(data, start=2):
+        text +=  f"Detalle: {row['detalle']} Valor: {row['valor']} Fecha: {row['fecha']}\n-----------------\n"     
+    await update.message.reply_text(text if text else "No se encontraron entradas")
+    print(f"[DEBUG] Gastos del mes obtenidos")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     print(f"[DEBUG] Mensaje recibido: {text}")
     res = call_gpt_deuda_deudor(text)
     print(f"[DEBUG] Respuesta de GPT (deuda/deudor): {res}")
+
     if(res is None):
         print(f"[DEBUG] No se pudo parsear la respuesta de GPT")
         await update.message.reply_text("😅 No pude entender tu peticion, lee de nuevo las instrucciones")
-    elif((res['tipo'].lower() == "-deudor" )or (res['tipo'].lower() == "-deuda" )):
-        print(f"[DEBUG] Tipo detectado: {res['tipo']}")
-        if(not res['valor']):
-            print(f"[DEBUG] Falta valor en deuda/deudor")
-            await update.message.reply_text("💰 Me falta el valor de la deuda/deudor. Enviame el monto (ej: 25000 o 28.500)")
-            return
-        if(not res['detalle']):
-            print(f"[DEBUG] Falta detalle en deuda/deudor")
-            await update.message.reply_text("📝 Necesito detalle de la deuda/deudor. Decime algo como: 'luis amazon', etc.")
-            return
-        print(f"[DEBUG] Agregando {res['tipo']}: {res['detalle']} - {res['valor']}")
-        await add_deudor_deuda(update, res['tipo'].lower(), res['detalle'], res['valor'])
-    elif((res['tipo'].lower() == "-abono") or (res['tipo'].lower() == "-pago")):
-        print(f"[DEBUG] Tipo detectado: {res['tipo']}")
-        if(not res['valor']):
-            print(f"[DEBUG] Falta valor en abono/pago")
-            await update.message.reply_text("💰 Me falta el valor del pago/abbono. Enviame el monto (ej: 25000 o 28.500)")
-            return
-        if(not res['detalle']):
-            print(f"[DEBUG] Falta detalle en abono/pago")
-            await update.message.reply_text("📝 Necesito detalle de la deuda/deudor. Decime algo como: 'luis amazon', etc.")
-            return
-        print(f"[DEBUG] Agregando {res['tipo']}: {res['detalle']} - {res['valor']}")
-        await add_abono_pago(update, res['tipo'].lower(), res['detalle'], res['valor'])        
-    elif((res['tipo'].lower() == "-dinero")):
-        print(f"[DEBUG] Tipo detectado: {res['tipo']}")
-        if(not res['valor']):
-            print(f"[DEBUG] Falta valor del dinero extra")
-            await update.message.reply_text("💰 Me falta el valor del dinero extra. Enviame el monto (ej: 25000 o 28.500)")
-            return
-        if(not res['detalle']):
-            print(f"[DEBUG] Falta detalle en dinero extra")
-            await update.message.reply_text("📝 Necesito detalle del dinero extra. Decime algo como: 'luis amazon', etc.")
-            return
-        print(f"[DEBUG] Agregando {res['tipo']}: {res['detalle']} - {res['valor']}")
-        await add_dinero_extra(update, res)    
-
-    elif res['tipo'].lower() == "gasto":
-        print(f"[DEBUG] Tipo detectado: gasto")
+    else:
+        tipo = res['tipo'].lower()
+        print(f"[DEBUG] Tipo detectado: {tipo}")
         try:
-            print(f"[DEBUG] Llamando GPT para extraer detalles del gasto...")
-            rec = call_gpt_extract(text)
-            print(f"[DEBUG] Respuesta de GPT (gasto): {rec}")
+            if(tipo == "gasto"):
+                print(f"[DEBUG] Llamando GPT para extraer detalles del gasto...")
+                rec = call_gpt_extract(text)
+            else:
+                rec = res
+            print(f"[DEBUG] Respuesta de GPT ({tipo}): {rec}")
             if not rec:
-                print(f"[DEBUG] No se pudo parsear el gasto")
+                print(f"[DEBUG] No se pudo parsear el {tipo}")
                 await update.message.reply_text("😅 No pude entender el gasto. Decime el monto y una descripción corta (ej: 'comida almuerzo 28000').")
                 return
 
             print(f"[DEBUG] Normalizando registro...")
-            rec = normalize_record(rec)
+            rec = normalize_record(rec, tipo)
             print(f"[DEBUG] Registro normalizado: {rec}")
 
             # Validación obligatoria
             if not rec["valor"]:
                 print(f"[DEBUG] Validación fallida: falta valor")
-                await update.message.reply_text("💰 Me falta el valor del gasto. Enviame el monto (ej: 25000 o 28.500).")
+                await update.message.reply_text("💰 Me falta el valor del {tipo}. Enviame el monto (ej: 25000 o 28.500).")
                 return
             if not has_required_description(rec):
                 print(f"[DEBUG] Validación fallida: falta descripción")
                 await update.message.reply_text("📝 Necesito una descripción/categoría. Decime algo como: 'comida/almuerzo', 'transporte/taxi' o un detalle corto.")
                 return
-            if not rec["cuenta"]:
+            if tipo=="gasto" and not rec["cuenta"]:
                 await update.message.reply_text("🏦 Me falta la cuenta de donde salió el dinero. Por favor indícala (ej: colpatria, nu, rappi card, nequi, rappi cuenta).")
                 return
 
-            print(f"[DEBUG] Todas las validaciones pasaron. Aplicando reglas de negocio...")
-            # Reglas de negocio
-            rec = enforce_business_rules(rec)
-            print(f"[DEBUG] Después de aplicar reglas: {rec}")
+            print(f"[DEBUG] Todas las validaciones pasaron")
 
             # Guardar
-            print(f"[DEBUG] Guardando en Google Sheets...")
-            persist_to_gsheets(rec)
-            print(f"[DEBUG] Guardado en Sheets exitosamente")
+            if(tipo == "abono" or tipo == "pago"):
+                print(f"[DEBUG] Actualizando en Google Sheets...")
+                update_sheet_row(tipo,rec)
+                print(f"[DEBUG] Actualizado en Sheets exitosamente")
+            else:
+                print(f"[DEBUG] Guardando en Google Sheets...")
+                persist_to_gsheets(rec, tipo)
+                print(f"[DEBUG] Guardado en Sheets exitosamente")
             
-            print(f"[DEBUG] Agregando a Notion...")
-            await add_to_notion(rec)
-            print(f"[DEBUG] Agregado a Notion exitosamente")
+            if tipo == "gasto":
+                await update.message.reply_text(
+                    f"✅ Guardado: {rec['categoria']} | ${format_number_with_decimals(int(rec['valor']))} | {rec['fecha']} {rec['hora']}"
+                    + (f" | {rec['comercio']}" if rec.get('comercio') else "")
+                    + (f" | {rec['cuenta']}" if rec.get('cuenta') else "")
+                )
+            else:
+                await update.message.reply_text(f"{tipo.upper()} {rec['detalle']} {format_number_with_decimals(int(rec['valor']))} registrado correctamente.")
 
-            await update.message.reply_text(
-                f"✅ Guardado: {rec['categoria']} | ${format_number_with_decimals(int(rec['valor']))} | {rec['fecha']} {rec['hora']}"
-                + (f" | {rec['comercio']}" if rec.get('comercio') else "")
-                + (f" | {rec['cuenta']}" if rec.get('cuenta') else "")
-            )
+
 
         except Exception as e:
             print(f"[DEBUG] Error durante el procesamiento: {e}")
             import traceback
             traceback.print_exc()
             await update.message.reply_text(f"Error: {e}")
-
+   
 
 def main():
     print("[DEBUG] Iniciando bot de gastos...")
